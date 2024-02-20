@@ -1,0 +1,4 @@
+/target
+.env
+users
+cargo.lock
