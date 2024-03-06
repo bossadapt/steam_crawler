@@ -57,7 +57,6 @@ struct Account {
     games: Vec<Game>,
 }
 //1.25 safe scrape// can get away with 1 for quite a while
-const API_CD: f32 = 1.0;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -89,14 +88,35 @@ async fn main() {
     let mut scrape_sleep_time: f32 = 1.00;
     let mut current_id: String = "76561198273971203".to_owned();
     while true {
-        let current_friends_return = get_friend_list(&current_id, &scrape_sleep_time).await;
-        scrape_sleep_time = current_friends_return.1;
-        attach_friends_to_sql(&conn, &current_id, &current_friends_return.0);
+        let current_friends_return: (Vec<String>, f32);
+        let current_friends_attempt = get_friend_list(&current_id, &scrape_sleep_time).await;
+        if current_friends_attempt.is_ok() {
+            current_friends_return = current_friends_attempt.unwrap();
+            scrape_sleep_time = current_friends_return.1;
+            attach_friends_to_sql(&conn, &current_id, &current_friends_return.0);
+        } else {
+            let empty_vec: Vec<String> = Vec::new();
+            current_friends_return = (empty_vec, scrape_sleep_time);
+        }
+
         let mut found_next_id = false;
         let current_friends = strip_redundant_entries(&conn, current_friends_return.0);
         for friend in current_friends {
-            let mut current_visability = get_visibility(&friend, &scrape_sleep_time).await;
+            let mut current_visability: (Visability, f32);
+            let current_visability_attempt = get_visibility(&friend, &scrape_sleep_time).await;
+            if current_visability_attempt.is_ok() {
+                current_visability = current_visability_attempt.unwrap();
+            } else {
+                let broken_visability_profile: Visability = Visability {
+                    games: false,
+                    freinds: false,
+                    reviews: false,
+                };
+                current_visability = (broken_visability_profile, scrape_sleep_time)
+            }
+
             scrape_sleep_time = current_visability.1;
+
             if !found_next_id && current_visability.0.freinds {
                 current_id = friend.clone();
                 found_next_id = true;
@@ -157,11 +177,23 @@ async fn add_scraped_data_to_sql(
     let mut scraped_data: Vec<Game> = Vec::new();
     let mut sleep_time = sleep_time;
     if scrapeable {
-        let reviews = get_review_list(&steam_id, &sleep_time).await;
-        sleep_time = reviews.1;
-        if reviews.0.len() != 0 {
-            let games = get_game_list(&steam_id, &steam_api).await;
-            scraped_data = combine_games_and_reviews(games, reviews.0)
+        let reviews_attempt = get_review_list(&steam_id, &sleep_time).await;
+        if reviews_attempt.is_ok() {
+            let reviews: (Vec<Review>, f32) = reviews_attempt.unwrap();
+            sleep_time = reviews.1;
+            if reviews.0.len() != 0 {
+                let games = get_game_list(&steam_id, &steam_api).await;
+                if games.is_ok() {
+                    println!("      added owned game(s)");
+                    scraped_data = combine_games_and_reviews(games.unwrap(), reviews.0)
+                } else {
+                    println!("Failed to games data two times, moving onto the next person");
+                    return sleep_time;
+                }
+            }
+        } else {
+            println!("Failed to review data two times, moving onto the next person");
+            return sleep_time;
         }
     }
     if scraped_data.len() == 0 {
@@ -258,18 +290,17 @@ fn combine_games_and_reviews(games: Vec<Game>, reviews: Vec<Review>) -> Vec<Game
     new_games
 }
 
-async fn get_raw_page(url: String, sleep_time: &f32) -> (String, f32) {
+async fn get_raw_page(url: String, sleep_time: &f32) -> Result<(String, f32), ()> {
     sleep(Duration::from_secs_f32(*sleep_time));
     let mut time = *sleep_time;
-    let raw_webpage: String = match reqwest::get(&url).await {
-        Ok(resp) => resp.text().await.unwrap(),
+    match reqwest::get(&url).await {
+        Ok(resp) => return Ok((resp.text().await.unwrap(), time)),
         Err(er) => {
             println!("url: {} error:{}", &url, er);
-            let output: String;
             if er.status() == None {
                 let mut initial_error_string = er.to_string();
                 let mut retry_count = 0;
-                let mut resp_text: String = "".to_owned();
+
                 while initial_error_string.contains("dns error") {
                     retry_count += 1;
                     println!(
@@ -279,55 +310,90 @@ async fn get_raw_page(url: String, sleep_time: &f32) -> (String, f32) {
                     sleep(Duration::from_secs(600));
                     match reqwest::get(&url).await {
                         Ok(resp) => {
-                            initial_error_string = "".to_owned();
-                            resp_text = resp.text().await.unwrap();
+                            return Ok((resp.text().await.unwrap(), time));
                         }
                         Err(err) => {
                             initial_error_string = err.to_string();
                         }
                     }
                 }
+
                 if er.to_string().contains("Connection reset by peer") {
                     println!("disconnected, connection reset, retrying in 1 sec ");
                     sleep(Duration::from_secs(1));
                     match reqwest::get(&url).await {
                         Ok(resp) => {
-                            resp_text = resp.text().await.unwrap();
+                            return Ok((resp.text().await.unwrap(), time));
                         }
-                        Err(err) => {}
+                        Err(_err) => {
+                            return Err(());
+                        }
                     }
                 }
                 if er.to_string().contains("channel closed") {
                     println!("|||||||||||||upping the scraping time1|||||||||||||||||");
                     sleep(Duration::from_secs(3600));
                     time = *sleep_time + 0.03;
-                    resp_text = reqwest::get(&url).await.unwrap().text().await.unwrap();
+                    match reqwest::get(&url).await {
+                        Ok(resp) => {
+                            return Ok((resp.text().await.unwrap(), time));
+                        }
+                        Err(_err) => {
+                            return Err(());
+                        }
+                    }
                 }
-                if resp_text == "".to_owned() {
-                    panic!("response was empty even after retying");
-                }
-                output = resp_text;
             } else if er.status().unwrap() == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || er.status().unwrap() == reqwest::StatusCode::SERVICE_UNAVAILABLE
             {
                 println!("|||||||||||||upping the scraping time2|||||||||||||||||");
                 sleep(Duration::from_secs(3600));
                 time = *sleep_time + 0.03;
-                output = reqwest::get(&url).await.unwrap().text().await.unwrap();
+                match reqwest::get(&url).await {
+                    Ok(resp) => {
+                        return Ok((resp.text().await.unwrap(), time));
+                    }
+                    Err(_err) => {
+                        return Err(());
+                    }
+                }
             } else {
                 println!("|||||||||||||retrying one time|||||||||||||||||");
                 sleep(Duration::from_secs(60));
-                output = reqwest::get(&url).await.unwrap().text().await.unwrap();
+                match reqwest::get(&url).await {
+                    Ok(resp) => {
+                        return Ok((resp.text().await.unwrap(), time));
+                    }
+                    Err(_err) => {
+                        return Err(());
+                    }
+                }
             }
-            output
         }
     };
-    return (raw_webpage, time);
+    sleep(Duration::from_secs_f32(*sleep_time));
+    println!("Unknown Error: retrying to retry");
+    match reqwest::get(&url).await {
+        Ok(resp) => {
+            return Ok((resp.text().await.unwrap(), time));
+        }
+        Err(_err) => {
+            return Err(());
+        }
+    }
 }
-async fn get_review_list(steam_id: &str, dyn_sleep: &f32) -> (Vec<Review>, f32) {
+async fn get_review_list(steam_id: &str, dyn_sleep: &f32) -> Result<(Vec<Review>, f32), ()> {
     let mut review_list: Vec<Review> = Vec::new();
     let url = format!("https://steamcommunity.com/profiles/{}/reviews", steam_id);
-    let raw_webpage = get_raw_page(url, &dyn_sleep).await;
+    let get_attempt = get_raw_page(url, &dyn_sleep).await;
+    let raw_webpage: (String, f32);
+    if get_attempt.is_ok() {
+        raw_webpage = get_attempt.unwrap();
+    } else {
+        //the webpage keeps giving errors
+        //also not including the time because if this error was not fixable by changing time then replacing the old time is a waste of time
+        return Err(());
+    }
     let mut document = scraper::Html::parse_document(&raw_webpage.0);
     let mut dyn_sleep = raw_webpage.1;
     let page_count = get_review_page_count(document.clone());
@@ -338,7 +404,13 @@ async fn get_review_list(steam_id: &str, dyn_sleep: &f32) -> (Vec<Review>, f32) 
                 "https://steamcommunity.com/profiles/{}/reviews/?p={}",
                 steam_id, current_page_number
             );
-            let raw_webpage = get_raw_page(url, &dyn_sleep).await;
+            let get_attempt = get_raw_page(url, &dyn_sleep).await;
+            let raw_webpage: (String, f32);
+            if get_attempt.is_ok() {
+                raw_webpage = get_attempt.unwrap();
+            } else {
+                return Err(());
+            }
             document = scraper::Html::parse_document(&raw_webpage.0);
             dyn_sleep = raw_webpage.1;
         }
@@ -397,7 +469,7 @@ async fn get_review_list(steam_id: &str, dyn_sleep: &f32) -> (Vec<Review>, f32) 
         current_page_number += 1;
     }
     println!("      added page(s) of reviews");
-    (review_list, dyn_sleep)
+    Ok((review_list, dyn_sleep))
 }
 fn get_review_page_count(document: Html) -> usize {
     let mut page_count: usize = 1;
@@ -424,10 +496,18 @@ fn get_review_page_count(document: Html) -> usize {
     page_count
 }
 //div.gameslistitems_GamesListItemContainer_29H3o
-async fn get_visibility(steam_id: &str, sleep_time: &f32) -> (Visability, f32) {
+async fn get_visibility(steam_id: &str, sleep_time: &f32) -> Result<(Visability, f32), ()> {
     //check that freinds, games and reviews are visable via their home profile
     let url = format!("https://steamcommunity.com/profiles/{}/", steam_id);
-    let raw_webpage = get_raw_page(url, &sleep_time).await;
+    let get_attempt = get_raw_page(url, &sleep_time).await;
+    let raw_webpage: (String, f32);
+    if get_attempt.is_ok() {
+        raw_webpage = get_attempt.unwrap();
+    } else {
+        //the webpage keeps giving errors
+        //also not including the time because if this error was not fixable by changing time then replacing the old time is a waste of time
+        return Err(());
+    }
     let sleep_time = raw_webpage.1;
     let document = scraper::Html::parse_document(&raw_webpage.0);
     let scraper_selector = scraper::Selector::parse("div.profile_item_links").unwrap();
@@ -489,44 +569,37 @@ async fn get_visibility(steam_id: &str, sleep_time: &f32) -> (Visability, f32) {
     let games_visable: bool = items.contains(&"games".to_owned());
     let reviews_visable: bool = items.contains(&"recommended".to_owned());
     //adding extra rules to stop wasting time trying to grab empty reviews/ only 1 review(cant see one review)
-    (
+    Ok((
         Visability {
             games: games_visable,
             reviews: reviews_visable,
             freinds: friends_visable,
         },
         sleep_time,
-    )
+    ))
 }
 
-async fn get_game_list(steam_id: &str, steam_api: &String) -> Vec<Game> {
+async fn get_game_list(steam_id: &str, steam_api: &String) -> Result<Vec<Game>, ()> {
     let url = format!(
         "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key={}&steamid={}&format=json",
         steam_api,steam_id
     );
-    let mut games: Vec<Game> = Vec::new();
-    match reqwest::get(&url).await {
+    let games: Result<Vec<Game>, ()> = match reqwest::get(&url).await {
         Ok(resp) => {
-            let resp_text = resp.text().await.unwrap();
-            let data: Data = match serde_json::from_str(&resp_text) {
-                Ok(data) => data,
-                Err(er) => {
-                    let output: Data;
-                    if resp_text.contains("502 Bad Gateway")
-                        || resp_text.contains("504 Gateway Time-out")
-                    {
-                        println!("|||| BAD API GATEWAY, TRYING AGAIN IN A MIN");
-                        sleep(Duration::from_secs(60));
-                        let pre_data = reqwest::get(&url).await.unwrap().text().await.unwrap();
-                        output = serde_json::from_str(&pre_data).unwrap();
-                    } else {
-                        println!("{}", resp_text);
-                        panic!("json switch failed");
-                    }
-                    output
+            let resp_text: String = resp.text().await.unwrap();
+            let data: Result<Data, serde_json::Error> = serde_json::from_str(&resp_text);
+            if data.is_ok() {
+                return Ok(data.unwrap().response.games);
+            } else {
+                sleep(Duration::from_secs(4));
+                let pre_data = reqwest::get(&url).await.unwrap().text().await.unwrap();
+                let data: Result<Data, serde_json::Error> = serde_json::from_str(&pre_data);
+                if data.is_ok() {
+                    return Ok(data.unwrap().response.games);
+                } else {
+                    return Err(());
                 }
-            };
-            games = data.response.games
+            }
         }
         Err(initial_error) => {
             let mut initial_error_string = initial_error.to_string();
@@ -536,44 +609,56 @@ async fn get_game_list(steam_id: &str, steam_api: &String) -> Vec<Game> {
                 while initial_error_string.contains("dns error") {
                     retry_count += 1;
                     println!(
-                        "disconnected, trying again in 10 min| attempt {}",
+                        "disconnected, trying again in 10 sec| attempt {}",
                         retry_count
                     );
-                    sleep(Duration::from_secs(600));
-                    match reqwest::get(&url).await {
+                    sleep(Duration::from_secs(10));
+                    let attempt: Result<Vec<Game>, ()> = match reqwest::get(&url).await {
                         Ok(resp) => {
                             initial_error_string = "".to_owned();
                             let resp_text = resp.text().await.unwrap();
                             let data: Data = serde_json::from_str(&resp_text).unwrap();
-                            games = data.response.games
+                            Ok(data.response.games)
                         }
                         Err(err) => {
                             initial_error_string = err.to_string();
+                            Err(())
                         }
+                    };
+                    if attempt.is_ok() {
+                        return attempt;
                     }
                 }
+                return Err(());
             } else if initial_error.status().unwrap() == StatusCode::GATEWAY_TIMEOUT {
                 println!("Trying to hit on a gateway timeout again");
                 sleep(Duration::from_secs(60));
                 let resp = reqwest::get(&url).await.unwrap();
                 let resp_text = resp.text().await.unwrap();
                 let data: Data = serde_json::from_str(&resp_text).unwrap();
-                games = data.response.games
+                Ok(data.response.games)
             } else {
-                println!("Reqwest Error: {}", initial_error);
+                println!("Reqwest Error at end of games: {}", initial_error);
                 panic!();
             }
         }
-    }
-    println!("      added owned game(s)");
+    };
     //sleep(Duration::from_secs_f32(API_CD));
     //no sleep on api
     games
 }
 
-async fn get_friend_list(steam_id: &str, sleep_time: &f32) -> (Vec<String>, f32) {
+async fn get_friend_list(steam_id: &str, sleep_time: &f32) -> Result<(Vec<String>, f32), ()> {
     let url = format!("https://steamcommunity.com/profiles/{}/friends/", steam_id);
-    let raw_webpage = get_raw_page(url, &sleep_time).await;
+    let get_attempt = get_raw_page(url, &sleep_time).await;
+    let raw_webpage: (String, f32);
+    if get_attempt.is_ok() {
+        raw_webpage = get_attempt.unwrap();
+    } else {
+        //the webpage keeps giving errors
+        //also not including the time because if this error was not fixable by changing time then replacing the old time is a waste of time
+        return Err(());
+    }
     let sleep_time = raw_webpage.1;
     let document = scraper::Html::parse_document(&raw_webpage.0);
     let scraper_selector = scraper::Selector::parse("div.selectable").unwrap();
@@ -588,5 +673,5 @@ async fn get_friend_list(steam_id: &str, sleep_time: &f32) -> (Vec<String>, f32)
         let freind_id = split_two[0];
         friend_id_list.push(freind_id.to_owned());
     }
-    (friend_id_list, sleep_time)
+    Ok((friend_id_list, sleep_time))
 }
