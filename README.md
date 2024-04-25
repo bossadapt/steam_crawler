@@ -9,4 +9,4 @@ This a program to gather public steam profiles that have {1,1500} reviews and ad
 5. repeat through one of those people with freinds visable or reach back into the dataset for someone who does have them available but not used freindslist
 
 ## Whats next
-currently I have over 150,000 profiles with games grabbed and over 700,000 profiles(alot of them nonpublic/dont have enough reviews) visited in total. I will create a recommendation system and likely publish my dataset so others can use it.
+currently I have over 500,000 profiles with games grabbed and over 2,000,000 profiles(alot of them nonpublic/dont have enough reviews) visited in total. I will create a recommendation system and likely publish my dataset so others can use it.
