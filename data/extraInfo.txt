@@ -1,0 +1,16 @@
+date started(estimate that leans towards before): 1/12/2024
+date collecting finished: 5/23/2024 1:51am cst
+
+Accounts attempted to be scraped: 3386202
+Users with games scraped from their profiles: 671355
+Games In user profiles: 85534
+Recomendation types: REC:4832157 , ANTIREC:857929, NOREVIEW:169698208
+
+Occurance of games with at over 0 time and...
+over 5 8265
+over 10 3234
+over 20 1237
+over 50 396
+over 100 194
+over 500 26
+over 1000 9
