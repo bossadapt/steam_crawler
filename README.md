@@ -12,7 +12,8 @@ This a program to gather public steam profiles that have {1,1500} reviews and ad
 I collected over 600,000 public profiles and peformed a few tests inside of that data directory of this project
 
 ## Why Collect this information?
-Besides the cool bar charts, I'm currently fine tuning my SteamRec AI that tries to predict what game belongs in your library to release
+1. I thought it was cool and fun project
+2. I also built another project out of this called Steam Rec AI that tries to guess which games you would play and recommend most.
 
 # Where can I get my hands on this dataset
-I will likely upload my dataset to kaggle when I finish making my AI
+I uploaded the data onto kaggle as a thanks for using a previous steam account list. You can find it [here](https://www.kaggle.com/datasets/bossadapt/public-steam-users-reviews-games-and-friends)
